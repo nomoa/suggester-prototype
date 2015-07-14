@@ -1,0 +1,206 @@
+<html>
+<head>
+	<link rel="stylesheet" href="jquery-ui/jquery-ui.css" type="css">
+	<script type="text/javascript" src="jquery-ui/external/jquery/jquery.js"></script>
+	<script type="text/javascript" src="jquery-ui/jquery-ui.min.js"></script>
+	<script type="text/javascript" src="levenshtein.js"></script>
+</head>
+
+<body>
+<script>
+	function merge(debug, results, inputData, scoreFactor, scoreFactorIfEqual, origTerm) {
+		scoreFactorIfEqual = typeof scoreFactorIfEqual !== 'undefined' ? scoreFactorIfEqual : 1;
+		origTerm = typeof origTerm !== 'undefined' ? origTerm : "";
+
+		inputData.forEach(function(e) {
+			if(!results[e.payload.pageId]) {
+				var score = e.score;
+				if(e.text.toLowerCase() == origTerm.toLowerCase()) {
+					score = score * scoreFactorIfEqual;
+				}
+				score = score * scoreFactor;
+				if(!results[e.payload.pageId]) {
+					results[e.payload.pageId] = {
+						label:e.text,
+						id:e.payload.pageId,
+						page:e.text,
+						score: score,
+						serverScore:e.score,
+						inputs: e.payload.inputs,
+						scoreDetail: e.payload.score,
+						debug: debug
+					}
+				} else {
+					results[e.payload.pageId].inputs = results[e.payload.pageId].inputs.concat(e.payload.inputs);
+				}
+			}
+		});
+
+	}
+
+	function chooseBestRedirect(output, term) {
+		output.forEach(function(e) {
+			var best = -1;
+			e.inputs.forEach(function(v) {
+				r = v;
+				if(v.length > term.length) {
+					r = v.substring(0, term.length);
+				}
+				var dist = new Levenshtein(term.toLowerCase(), r.toLowerCase());
+				if(best < 0 || dist.distance < best) {
+					best = dist.distance;
+					e.label = v;
+				}
+			});
+		});
+	}
+
+	$(function() {
+		$("#keyword").autocomplete({
+			source: function(request, response) {
+				var withGeo = "";
+				if($("#lat").val().length > 0 && $("#lon").val().length > 0) {
+					withGeo = "-geo";
+				}
+				var postData = {
+					"title-suggest-exact": {
+						"text": request.term,
+						"completion": {
+							"field": "suggest" + withGeo,
+							"size": 20
+						}
+					},
+					"title-suggest": {
+						"text": request.term,
+						"completion": {
+							"field": "suggest"+withGeo,
+							"size": 20,
+							"fuzzy" : {
+								"prefix_length": 0,
+								"fuzziness" : "AUTO"
+							}
+
+						}
+					},
+					"title-suggest-nopos-exact": {
+						"text": request.term,
+						"completion": {
+							"field": "suggest-nopos"+withGeo,
+							"size": 20,
+
+						}
+					},
+					"title-suggest-nopos": {
+						"text": request.term,
+						"completion": {
+							"field": "suggest-nopos"+withGeo,
+							"size": 20,
+							"fuzzy" : {
+								"prefix_length": 0,
+								"fuzziness" : "AUTO"
+							}
+						}
+					}
+				};
+				if($("#lat").val().length > 0 && $("#lon").val().length > 0) {
+					var locContext = {
+						"location": {
+							"lat":parseFloat($("#lat").val()),
+							"lon":parseFloat($("#lon").val()),
+							"precision": "1000km"
+						}
+					};
+					postData['title-suggest-exact']['completion']['context'] = locContext
+					postData['title-suggest']['completion']['context'] = locContext
+					postData['title-suggest-nopos-exact']['completion']['context'] = locContext
+					postData['title-suggest-nopos']['completion']['context'] = locContext
+				}
+				$.ajax({
+					url: "http://localhost:10200/title_suggest/_suggest",
+					type: "POST",
+					crossDomain: true,
+					dataType: "json",
+					data: JSON.stringify(postData),
+					success: function(data) {
+						var results = {};
+						merge("PE", results, data["title-suggest-exact"][0].options, 1, 2, request.term);
+						merge("PF", results, data["title-suggest"][0].options, 0.2);
+						merge("NE", results, data["title-suggest-nopos-exact"][0].options, 0.3);
+						merge("NF", results, data["title-suggest-nopos"][0].options, 0.1);
+						var output = [];
+						for(var r in results) {
+							output.push(results[r]);
+						}
+						output.sort(function(a, b) {
+							return b.score - a.score;
+						});
+						output = output.slice(0,10);
+						chooseBestRedirect(output, request.term);
+						response(output);
+					},
+				});
+			},
+			minLength: 1,
+			focus: function(event, ui) {
+				$("#page").html(ui.item.id + " " + ui.item.page);
+				$("#score").html(ui.item.score + " " + ui.item.debug);
+				$("#weight").html(ui.item.serverScore);
+				var redirs = "<ul>";
+				ui.item.inputs.forEach(function (r) {
+					redirs += "<li>" + r + "</li>";
+				});
+				redirs += "</ul>";
+				$("#redirects").html(redirs);
+				scoDet = "<table>";
+				for(var k in ui.item.scoreDetail) {
+					scoDet += "<tr><td>"+k + "</td><td align='right'>" + ui.item.scoreDetail[k].toFixed(3) + "</td></tr>";
+				}
+				scoDet += "</table>";
+				$("#scoreDetail").html(scoDet);
+			}
+		})
+	});
+
+
+
+</script>
+
+
+<div class="demo">
+	<div class="ui-widget" style="float:left">
+		<label for="keyword">Keyword: </label>
+		<input id="keyword" size="30">
+		<label>Context:</label>
+		<label for="lat">lat:</label>
+		<input id="lat" size="10">
+		<label for="lon">lon:</label>
+		<input id="lon" size="10">
+	</div>
+	<div class="ui-widget" style="float:left; margin-left:40px;">
+		<table>
+		<tr>
+			<td><label>Page:</label></td>
+			<td><span id="page"></span><br/></td>
+		</tr>
+		<tr>
+			<td><label>Suggest Score:</label></td>
+			<td><span id="score"></span><br/></td>
+		</tr>
+		<tr>
+			<td><label>Weight:</label></td>
+			<td><span id="weight"></span><br/></td>
+		</tr>
+		<tr>
+			<td><label>Score Detail:</label></td>
+			<td><span id="scoreDetail"></span><br/></td>
+		</tr>
+		<tr>
+			<td><label>Redirects:</label></td>
+			<td><span id="redirects"</span><br/></td>
+		</tr>
+		</table>
+	</div>
+
+</body>
+</html>
+
